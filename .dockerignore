@@ -6,7 +6,10 @@ node_modules
 **/*.tgz
 **/*.log
 .tmp
-.opencode
-.omo
-.sisyphus
+.alfonso
+.cortexkit
 .hive
+.omo
+.opencode
+.pi
+.sisyphus

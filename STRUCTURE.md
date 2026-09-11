@@ -378,7 +378,7 @@ These directories exist at build time but are **gitignored** (see `.gitignore`).
 - `coverage/`, `*.lcov`, `logs/`, `*.log`, `_.log`, `antigravity-debug-*.log` — coverage + log output. Ignored.
 - `*.tsbuildinfo` — TypeScript incremental compile cache. Ignored.
 - `.opencode/` — IDE + local OpenCode plugin dir. The root `.gitignore` ignores it; `scripts/dev.ts` makes `.opencode/plugins/antigravity-auth.js` a symlink during dev.
-- Agent working directories: `.hive/`, `.omo/`, `.opencode/`, `.sisyphus/`, `.alfonso/` — session state, historian dumps, run continuation, council runs. All ignored.
+- Agent working directories: `.alfonso/`, `.cortexkit/`, `.hive/`, `.omo/`, `.opencode/`, `.pi/`, `.sisyphus/` — session state, model wire dumps, historian output, run continuation, and council runs. All ignored.
 - `test-file.ts` — temporary scratch file used by the dev loop. Ignored.
 - `package-lock.json` — npm optional-dep native-binary workaround. Ignored.
 
