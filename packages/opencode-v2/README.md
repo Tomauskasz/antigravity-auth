@@ -44,6 +44,10 @@ whatever `event.request` the hook leaves behind through its own HTTP client, and
 core's raw HTTP/1.1 transport (agy header order, proxy support) while the host still sees a
 plain SSE response it can stream and cancel.
 
+The `oc-plugin` manifest enables only the server entry. The exported `/tui` and `/rpc` modules
+are inert and exist solely because OpenCode 2's cross-platform package resolver probes those
+subpaths even for server-only packages; OpenCode 2 continues to render its native provider UI.
+
 ## Install
 
 Install the adapter package itself (the shared core is pulled in automatically):

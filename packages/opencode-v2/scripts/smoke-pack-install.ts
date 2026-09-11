@@ -82,6 +82,11 @@ async function main(): Promise<void> {
         'OpenCode 2 host resolver did not discover a server entry',
       )
     }
+    if (!resolved.tui || !resolved.rpc) {
+      throw new Error(
+        'OpenCode 2 host resolver requires inert TUI and RPC compatibility exports',
+      )
+    }
     if (
       existsSync(join(consumerDir, 'node_modules', '@opencode-ai', 'plugin'))
     ) {
@@ -118,6 +123,18 @@ async function main(): Promise<void> {
     }
     if (typeof module.default?.setup !== 'function') {
       throw new Error('Packed OpenCode 2 server entry has no setup function')
+    }
+    const tuiModule = (await import(resolved.tui)) as {
+      default?: { tui?: unknown }
+    }
+    if (typeof tuiModule.default?.tui !== 'function') {
+      throw new Error('Packed OpenCode 2 compatibility TUI entry is invalid')
+    }
+    const rpcModule = (await import(resolved.rpc)) as {
+      default?: { id?: unknown }
+    }
+    if (typeof rpcModule.default?.id !== 'string') {
+      throw new Error('Packed OpenCode 2 compatibility RPC entry is invalid')
     }
 
     console.log(

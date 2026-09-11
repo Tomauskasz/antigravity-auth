@@ -30,7 +30,9 @@
   "main": "./dist/plugin.js",
   "exports": {
     ".": "./dist/plugin.js",
-    "./server": "./dist/plugin.js"
+    "./server": "./dist/plugin.js",
+    "./tui": "./dist/tui.js",
+    "./rpc": "./dist/rpc.js"
   },
   "oc-plugin": [
     "server"

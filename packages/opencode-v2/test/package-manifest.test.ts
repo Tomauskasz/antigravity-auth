@@ -15,5 +15,11 @@ describe('OpenCode 2 package manifest', () => {
       new URL('../dist/plugin.js', import.meta.url).href,
     )
     expect(fileURLToPath(entrypoints.server!)).toStartWith(packageRoot)
+    expect(entrypoints.tui).toBe(
+      new URL('../dist/tui.js', import.meta.url).href,
+    )
+    expect(entrypoints.rpc).toBe(
+      new URL('../dist/rpc.js', import.meta.url).href,
+    )
   })
 })
