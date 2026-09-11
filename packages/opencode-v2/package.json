@@ -1,7 +1,7 @@
 {
   "name": "@cortexkit/opencode-v2-antigravity-auth",
-  "version": "2.1.0",
-  "description": "Google Antigravity provider for OpenCode 2.x (native plugin API)",
+  "version": "2.2.1",
+  "description": "Google Antigravity server adapter for OpenCode 2.x",
   "type": "module",
   "license": "MIT",
   "author": "CortexKit",
@@ -27,25 +27,34 @@
     "node": ">=20.0.0",
     "opencode": ">=2 <3"
   },
-  "main": "./src/plugin.mjs",
+  "main": "./dist/plugin.js",
   "exports": {
-    ".": "./src/plugin.mjs",
-    "./oauth-callback": "./src/oauth-callback.mjs"
+    ".": "./dist/plugin.js",
+    "./server": "./dist/plugin.js"
   },
+  "oc-plugin": [
+    "server"
+  ],
   "files": [
-    "src/",
+    "dist/",
     "example/",
     "README.md",
     "README.zh-CN.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "scripts": {
-    "lint": "biome lint src example",
-    "format:check": "biome format src example README.md README.zh-CN.md",
-    "typecheck": "node --check src/plugin.mjs && node --check src/oauth-callback.mjs",
-    "test": "bun run --cwd ../core build && cd ../.. && bun test --isolate packages/opencode-v2/test"
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "lint": "biome lint src test scripts example",
+    "format:check": "biome format src test scripts example README.md README.zh-CN.md",
+    "typecheck": "tsc --noEmit",
+    "test": "bun run --cwd ../core build && bun run build && cd ../.. && bun test --isolate packages/opencode-v2/test",
+    "smoke:pack": "bun run build && bun scripts/smoke-pack-install.ts"
   },
   "dependencies": {
-    "@cortexkit/antigravity-auth-core": "2.1.0"
+    "@cortexkit/antigravity-auth-core": "2.2.1"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "0.0.0-beta-19234"
   }
 }

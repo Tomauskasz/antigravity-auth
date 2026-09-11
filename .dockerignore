@@ -1,0 +1,12 @@
+.git
+node_modules
+**/node_modules
+**/dist
+**/coverage
+**/*.tgz
+**/*.log
+.tmp
+.opencode
+.omo
+.sisyphus
+.hive

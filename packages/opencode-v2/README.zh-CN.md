@@ -6,8 +6,8 @@
 `@cortexkit/opencode-antigravity-auth` 面向 OpenCode 1.x 宿主
 （`engines.opencode: ">=1.17.13 <2"`）：它通过劫持 `fetch()` 并注册 TUI 侧边栏来工作。
 OpenCode 2.x 用新的插件 API 取代了这些接口（`session.hook`、`integration.transform`、
-`tool.transform`、原生 provider 包），因此 1.x 插件无法在 2.x 中加载。本包补上了这层宿主适配：
-OAuth、传输、账号池、配额与模型注册表仍然全部复用共享 core。
+原生 provider 包），因此 1.x 插件无法在 2.x 中加载。本包补上了这层宿主适配：
+OAuth、传输、账号池轮换、限流记录与模型注册表仍然全部复用共享 core。
 
 > **服务条款警告。** 本项目调用 Antigravity 的非公开内部 API，未获 Google 认可，可能违反
 > Google 服务条款；已有账号因类似用法被限制的报告。请自行评估风险，不要使用重要账号。
@@ -50,32 +50,19 @@ npm install @cortexkit/opencode-v2-antigravity-auth
 bun install
 ```
 
-插件的入口是包内的 `src/plugin.mjs`。在 `opencode.json` 中，把 `plugins[].package` 指向该文件：
-npm 安装时用 `node_modules/@cortexkit/opencode-v2-antigravity-auth/src/plugin.mjs`
-（相对于项目目录），从仓库检出时用绝对路径
-`/path/to/antigravity-auth/packages/opencode-v2/src/plugin.mjs`。下面示例使用检出路径。
-
-然后在 `opencode.json` 中注册插件与模型（完整示例见
-[`example/opencode.json`](example/opencode.json)）：
+在 `opencode.json` 中注册 npm 包和 Antigravity 模型。本地检出时，可将包名替换为包目录的绝对路径
+（`/path/to/antigravity-auth/packages/opencode-v2`）。完整模型配置见
+[`example/opencode.json`](example/opencode.json)。
 
 ```jsonc
 {
-  "plugins": [
-    {
-      "package": "/绝对路径/antigravity-auth/packages/opencode-v2/src/plugin.mjs",
-      "options": {
-        // 可选：限定 antigravity_read_document 可读取的目录。
-        // 默认：用户主目录下的任意位置（凭据/密钥路径始终被拦截）。
-        "readDocumentRoots": ["/绝对路径/project/docs"]
-      }
-    }
-  ],
+  "plugins": ["@cortexkit/opencode-v2-antigravity-auth"],
   "providers": {
     "google": {
       "models": {
-        "gemini-3.7-flash": {
-          "name": "Gemini 3.7 Flash",
-          "modelID": "gemini-3.7-flash",
+        "gemini-3.8-flash": {
+          "name": "Gemini 3.8 Flash",
+          "modelID": "gemini-3.8-flash",
           "package": "@opencode-ai/ai/providers/google",
           "capabilities": { "tools": true, "input": ["text", "image", "pdf"], "output": ["text"] },
           "limit": { "context": 1048576, "output": 65536 },
@@ -97,13 +84,15 @@ npm 安装时用 `node_modules/@cortexkit/opencode-v2-antigravity-auth/src/plugi
   **“Google Antigravity (add account)”**。每次登录都是**追加**，不会覆盖已有账号。
   回调监听 `127.0.0.1:51121/oauth-callback`。
 - 停用账号：把该条目设为 `"enabled": false`。
-- 账号选择使用 core 的 `hybrid` 策略；遇到 `429`/`403` 会让该账号冷却并切换到下一个，
-  `401` 会强制刷新 token，返回空候选的 `STOP` 最多重试三次。
+- 账号选择使用 core 的 `hybrid` 策略。`401` 只强制刷新一次 token，`429` 会记录限流状态并轮换；
+  明确的 `ACCOUNT_INELIGIBLE` / `VALIDATION_REQUIRED` 会先停用受影响账号，再选择其他账号。
+  最终传输和 SSE 错误会进入 OpenCode 原生错误路径。
 
 ## 模型
 
 | 选择器 | 变体 | 实际下发模型 |
 | --- | --- | --- |
+| `google/gemini-3.8-flash` | low, medium, high | `gemini-3.8-flash-{tier}` |
 | `google/gemini-3.7-flash` | low, medium, high | `gemini-3.7-flash-{tier}` |
 | `google/gemini-3.6-flash` | low, medium, high | `gemini-3.6-flash-{tier}` |
 | `google/gemini-3.5-flash` | low, medium, high | `gemini-3.5-flash-extra-low` / `gemini-3.5-flash-low` / `gemini-3-flash-agent` |
@@ -126,35 +115,18 @@ npm 安装时用 `node_modules/@cortexkit/opencode-v2-antigravity-auth/src/plugi
    因此每一帧在转发前都会被规范化。
 3. **响应编码**：core 传输层已经解压 gzip，因此上游的 `content-encoding` 头不能复制到
    回环响应上。
-4. **PDF 附件**：OpenCode 2.x CLI 在请求到达 provider 之前就丢弃了 PDF 附件
-   （请求中没有任何 `inlineData`）。因此插件额外注册了 `antigravity_read_document` 工具，
-   由插件自己读取文件：`antigravity_read_document({ path, question?, model? })`，
-   支持 `.pdf`、`.png`、`.jpg`、`.webp`、`.gif`、`.heic`。聊天中粘贴的图片无需该工具即可工作。
-   **安全说明**：该工具会读取本地文件并发送到 Antigravity 服务器 —— 不可信的 PDF/图片是
-   prompt-injection 的载体，可能诱导模型读取敏感文件。因此路径经过检查：
-   常见的凭据/密钥位置（`~/.ssh`、`~/.config`、`~/.local`、`AppData`、`.env`、`*.key`、
-   `*.pem`、`*.p12`、`*.pfx`、`id_rsa`、`credentials`、`auth.json`、
-   `antigravity-accounts.json` 等）始终被拒绝；默认只允许读取用户主目录下的文件。如需
-   进一步收窄可读范围，请设置插件选项 `readDocumentRoots`（绝对路径数组）。尽量在聊天中
-   附带文档，宿主会保留附件。
-5. **图片输出**：原生解析器只渲染文本与 tool call，因此生成的图片会写入
-   `<data dir>/antigravity-images/`，并以文本形式告知路径。
+4. **图片输出**：图片模型的标题请求会路由到受支持的 Gemini 3.5 Flash low 层级；图片请求会移除不支持的工具和 thinking 配置。
+   生成图片以私有权限写入 `~/.opencode/generated-images/`，再以文本形式告知路径。
 
 ## 日志与隐私
 
 `<state dir>/antigravity-v2.log` 只记录路由、`#<账号序号>`、上游状态码、账号轮换与已保存图片路径；
 不写入任何 prompt、token、邮箱或 refresh token。凭据只保存在由 core 管理的账号池文件中。
 
-## 实测
+## 验证
 
-Windows 11、Node 24、OpenCode `0.0.0-beta-17595`、两账号池：
-
-- 上表 8 个选择器全部通过真实请求（包含每个推理档位）；
-- tool call 端到端可用（模型调用 `read` 并返回目录列表）；
-- PNG 附件识别正确（纯红色方块 → “Red”）；
-- 通过 `antigravity_read_document` 读取 PDF，返回了其中的精确文本；
-- 图片生成得到两个 JPEG 文件；
-- 强制故障转移：停用 `#0` 账号后，下一次请求走到了 `#1` 账号。
+确定性的 OpenCode 2 E2E 套件会启动真实、固定版本的宿主二进制，并显式设置隔离的
+`OPENCODE_DB`。CI 和发布流程会在禁用容器网络的 Docker 环境中运行同一套测试，确保无法访问实时端点。测试覆盖真实 hook 路由、最终 AGY 请求结构、账号不适用状态的落盘与轮换、图片和日志文件权限，以及传输错误、SSE 内嵌错误和干净 EOF 的原生错误传播。
 
 ## 许可证
 

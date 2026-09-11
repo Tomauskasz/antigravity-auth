@@ -2,12 +2,18 @@
 // Google redirects to http://localhost:51121/oauth-callback (the redirect URI
 // registered for the Antigravity OAuth client), so the port is fixed.
 
+import type { ServerResponse } from 'node:http'
 import { createServer } from 'node:http'
 
 const CALLBACK_HOST = '127.0.0.1'
 const CALLBACK_PATH = '/oauth-callback'
 const CALLBACK_PORT = 51121
 const CALLBACK_TIMEOUT_MS = 10 * 60_000
+
+interface AntigravityCodeOptions {
+  port?: number
+  timeoutMs?: number
+}
 
 // The callback page only acknowledges that the authorization code arrived; the
 // token exchange and account persistence happen afterwards in the plugin, so the
@@ -17,7 +23,7 @@ const PAGE_OK = `<!doctype html><meta charset="utf-8"><title>Antigravity authori
 const PAGE_FAIL = `<!doctype html><meta charset="utf-8"><title>Antigravity login failed</title>
 <body style="font-family:system-ui;padding:2rem"><h2>Login failed</h2><p>Return to OpenCode and try again.</p></body>`
 
-function respond(response, status, page) {
+function respond(response: ServerResponse, status: number, page: string): void {
   response.writeHead(status, {
     'cache-control': 'no-store',
     connection: 'close',
@@ -30,17 +36,20 @@ function respond(response, status, page) {
  * Starts listening immediately and resolves with the authorization code once
  * Google redirects back with the matching state.
  */
-export function waitForAntigravityCode(expectedState, options = {}) {
+export function waitForAntigravityCode(
+  expectedState: string,
+  options: AntigravityCodeOptions = {},
+): Promise<string> {
   if (!expectedState) throw new Error('OAuth state is empty')
   const port = options.port ?? CALLBACK_PORT
   const timeoutMs = options.timeoutMs ?? CALLBACK_TIMEOUT_MS
 
-  return new Promise((resolve, reject) => {
+  return new Promise<string>((resolve, reject) => {
     let settled = false
-    let timer
+    let timer: NodeJS.Timeout | undefined
 
     const server = createServer((request, response) => {
-      let url
+      let url: URL
       try {
         url = new URL(request.url ?? '/', `http://${CALLBACK_HOST}:${port}`)
       } catch {
@@ -74,13 +83,20 @@ export function waitForAntigravityCode(expectedState, options = {}) {
       finish(code)
     })
 
-    function finish(code, error) {
+    function finish(code?: string, error?: unknown): void {
       if (settled) return
       settled = true
-      clearTimeout(timer)
+      if (timer) clearTimeout(timer)
       server.close(() => {})
-      if (error) reject(error)
-      else resolve(code)
+      if (error) {
+        reject(error)
+        return
+      }
+      if (!code) {
+        reject(new Error('Antigravity authorization returned no code'))
+        return
+      }
+      resolve(code)
     }
 
     server.once('error', (error) => finish(undefined, error))

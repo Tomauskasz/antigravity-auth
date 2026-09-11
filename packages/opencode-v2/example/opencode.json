@@ -1,15 +1,16 @@
 {
-  "plugins": [
-    {
-      "package": "/absolute/path/to/antigravity-auth/packages/opencode-v2/src/plugin.mjs",
-      "options": {
-        "readDocumentRoots": ["/absolute/path/to/documents"]
-      }
-    }
-  ],
+  "plugins": ["@cortexkit/opencode-v2-antigravity-auth"],
   "providers": {
     "google": {
       "models": {
+        "gemini-3.8-flash": {
+          "name": "Gemini 3.8 Flash",
+          "modelID": "gemini-3.8-flash",
+          "package": "@opencode-ai/ai/providers/google",
+          "capabilities": { "tools": true, "input": ["text", "image", "pdf"], "output": ["text"] },
+          "limit": { "context": 1048576, "output": 65536 },
+          "variants": [{ "id": "low" }, { "id": "medium" }, { "id": "high" }]
+        },
         "gemini-3.7-flash": {
           "name": "Gemini 3.7 Flash",
           "modelID": "gemini-3.7-flash",
