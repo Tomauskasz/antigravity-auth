@@ -72,6 +72,13 @@
         "typescript",
       ],
     },
+    "packages/opencode-v2": {
+      "name": "@cortexkit/opencode-v2-antigravity-auth",
+      "version": "2.1.0",
+      "dependencies": {
+        "@cortexkit/antigravity-auth-core": "2.1.0",
+      },
+    },
     "packages/pi": {
       "name": "@cortexkit/pi-antigravity-auth",
       "version": "2.1.0",
@@ -227,6 +234,8 @@
     "@cortexkit/antigravity-auth-e2e": ["@cortexkit/antigravity-auth-e2e@workspace:packages/e2e-tests"],
 
     "@cortexkit/opencode-antigravity-auth": ["@cortexkit/opencode-antigravity-auth@workspace:packages/opencode"],
+
+    "@cortexkit/opencode-v2-antigravity-auth": ["@cortexkit/opencode-v2-antigravity-auth@workspace:packages/opencode-v2"],
 
     "@cortexkit/pi-antigravity-auth": ["@cortexkit/pi-antigravity-auth@workspace:packages/pi"],
 
