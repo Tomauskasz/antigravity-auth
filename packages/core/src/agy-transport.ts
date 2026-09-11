@@ -184,11 +184,13 @@ async function connectViaProxy(
   proxyUrl: URL,
   targetUrl: URL,
   timeoutMs: number,
+  signal?: AbortSignal | null,
   onDebug?: (message: string) => void,
 ): Promise<tls.TLSSocket> {
   const proxySocket = net.connect({
     host: proxyUrl.hostname,
     port: Number(proxyUrl.port || DEFAULT_PROXY_PORT),
+    signal: signal ?? undefined,
   })
 
   await new Promise<void>((resolve, reject) => {
@@ -245,6 +247,7 @@ async function connectViaProxy(
     const tlsSocket = tls.connect({
       socket: proxySocket,
       servername: targetHost,
+      signal: signal ?? undefined,
     })
     const timeout = setTimeout(() => {
       onDebug?.(
@@ -272,6 +275,7 @@ async function connectViaProxy(
 async function connectDirect(
   targetUrl: URL,
   timeoutMs: number,
+  signal?: AbortSignal | null,
   onDebug?: (message: string) => void,
 ): Promise<tls.TLSSocket> {
   return await new Promise<tls.TLSSocket>((resolve, reject) => {
@@ -279,6 +283,7 @@ async function connectDirect(
       host: targetUrl.hostname,
       port: Number(targetUrl.port || DEFAULT_HTTPS_PORT),
       servername: targetUrl.hostname,
+      signal: signal ?? undefined,
     })
     const timeout = setTimeout(() => {
       onDebug?.(`agy transport TLS connect timeout after ${timeoutMs}ms`)
@@ -304,12 +309,13 @@ async function connectDirect(
 async function connectTls(
   targetUrl: URL,
   timeoutMs: number,
+  signal?: AbortSignal | null,
   onDebug?: (message: string) => void,
 ): Promise<tls.TLSSocket> {
   const proxyUrl = getHttpsProxy(targetUrl)
   return proxyUrl
-    ? await connectViaProxy(proxyUrl, targetUrl, timeoutMs, onDebug)
-    : await connectDirect(targetUrl, timeoutMs, onDebug)
+    ? await connectViaProxy(proxyUrl, targetUrl, timeoutMs, signal, onDebug)
+    : await connectDirect(targetUrl, timeoutMs, signal, onDebug)
 }
 
 function serializeRequest(url: URL, init: RequestInit, body: Buffer): Buffer {
@@ -572,9 +578,7 @@ export async function fetchWithAgyCliTransport(
   options.onDebug?.(
     `agy transport connecting to ${parsedUrl.hostname} with header timeout ${timeoutMs}ms`,
   )
-  // Race the connect against abort so a cancel during TLS/proxy connect is
-  // honored immediately instead of waiting out the connect timeout.
-  const socket = await connectTlsWithAbort(
+  const socket = await connectTls(
     parsedUrl,
     timeoutMs,
     options.signal,
@@ -620,32 +624,5 @@ export async function fetchWithAgyCliTransport(
     throw error
   } finally {
     options.signal?.removeEventListener('abort', abort)
-  }
-}
-
-async function connectTlsWithAbort(
-  targetUrl: URL,
-  timeoutMs: number,
-  signal: AbortSignal | null | undefined,
-  onDebug?: (message: string) => void,
-): Promise<tls.TLSSocket> {
-  if (!signal) {
-    return connectTls(targetUrl, timeoutMs, onDebug)
-  }
-  const connectPromise = connectTls(targetUrl, timeoutMs, onDebug)
-  let onAbort: (() => void) | undefined
-  const abortPromise = new Promise<never>((_, reject) => {
-    onAbort = () =>
-      reject(new DOMException('The operation was aborted', 'AbortError'))
-    signal.addEventListener('abort', onAbort, { once: true })
-  })
-  try {
-    return await Promise.race([connectPromise, abortPromise])
-  } catch (error) {
-    // If abort won the race, make sure the in-flight socket is torn down once it resolves.
-    void connectPromise.then((socket) => socket.destroy()).catch(() => {})
-    throw error
-  } finally {
-    if (onAbort) signal.removeEventListener('abort', onAbort)
   }
 }

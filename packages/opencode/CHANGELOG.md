@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Request cancellation now destroys in-flight direct and HTTPS-proxy connections immediately instead of leaving sockets alive until the transport timeout.
+
 ## [2.2.1] - 2026-09-04
 
 ### Fixed
