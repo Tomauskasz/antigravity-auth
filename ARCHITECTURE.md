@@ -1,6 +1,6 @@
 # Architecture
 
-This document is the system-of-record for the `@cortexkit/antigravity-auth*` stack at the v2.0 parity refactor. It describes the **final** source tree at code revision `397f654` — every cited symbol has a live line reference against the files that actually ship, not the prior single-file plugin that the refactor decomposed into `packages/opencode/src/plugin/index.ts` plus the slim `packages/opencode/index.ts` barrel.
+This document is the system-of-record for the `@cortexkit/antigravity-auth*` stack at the v2.0 parity refactor. It describes the **final** source tree at code revision `cd7a003` — every cited symbol has a live line reference against the files that actually ship, not the prior single-file plugin that the refactor decomposed into `packages/opencode/src/plugin/index.ts` plus the slim `packages/opencode/index.ts` barrel.
 
 ## System goals and boundaries
 
@@ -88,7 +88,7 @@ The TUI loads the compiled bundle (`packages/opencode/src/tui/entry.mjs:30-38`) 
 | --- | --- | --- | --- |
 | OAuth | `antigravity/oauth.ts` | core | `authorizeAntigravity`, `exchangeAntigravity`, PKCE pack/unpack |
 | Token state | `auth.ts` | `packages/core/src/auth.ts:1-62` | `parseRefreshParts`, `formatRefreshParts`, expiry buffer |
-| Transport | `agy-transport.ts` | `packages/core/src/agy-transport.ts:1-651` | TLS socket pool, chunked/gzip decode, header/idle timeouts |
+| Transport | `agy-transport.ts` | `packages/core/src/agy-transport.ts:1-628` | TLS socket pool, chunked/gzip decode, header/idle timeouts |
 | Active timeout | `fetch-timeout.ts` | `packages/core/src/fetch-timeout.ts:1-54` | 15s header-only abort for `globalThis.fetch` callers |
 | Quota + planning | `quota-manager.ts` | `packages/core/src/quota-manager.ts:1-1085` | Attributed fetch, exponential backoff, in-flight dedupe |
 | Account pool | `account-manager.ts` | `packages/core/src/account-manager.ts:1-2249` | Selection, rate-limit state, fingerprint, soft-quota |
@@ -582,7 +582,7 @@ The stack has three distinct timeout systems, **deliberately separated**:
 | AGY response header timeout | **180s** | TLS connect + response headers via raw socket | `packages/core/src/agy-transport.ts:12` |
 | AGY idle timeout | **180s** | Stalled response body — kills the socket if no bytes for 180s | `packages/core/src/agy-transport.ts:16` |
 
-The 15s `ACTIVE_FETCH_TIMEOUT_MS` is stream-safe: it only aborts the request signal until the underlying `fetchImpl` resolves, then removes the timeout listener so the returned body can be streamed past the deadline (`packages/core/src/fetch-timeout.ts:28-54`). The 180s `DEFAULT_AGY_RESPONSE_HEADER_TIMEOUT_MS` covers the Antigravity `agy` CLI's own connect behavior, and the 180s `DEFAULT_AGY_IDLE_TIMEOUT_MS` is a watchdog against a hung body — it resets on every received chunk (line 505-525 in `agy-transport.ts`). The two are independent: a slow but streaming response triggers neither.
+The 15s `ACTIVE_FETCH_TIMEOUT_MS` is stream-safe: it only aborts the request signal until the underlying `fetchImpl` resolves, then removes the timeout listener so the returned body can be streamed past the deadline (`packages/core/src/fetch-timeout.ts:28-54`). The 180s `DEFAULT_AGY_RESPONSE_HEADER_TIMEOUT_MS` covers the Antigravity `agy` CLI's own connect behavior, and the 180s `DEFAULT_AGY_IDLE_TIMEOUT_MS` is a watchdog against a hung body — it resets on every received chunk (lines 518-531 in `agy-transport.ts`). The two are independent: a slow but streaming response triggers neither.
 
 ```mermaid
 gantt
@@ -686,7 +686,7 @@ Specific recovery paths:
 - **All accounts rate-limited, no quota fallback** — synthetic 200 with the same pattern as the soft-quota case.
 - **Killswitch trips** — `throwIfAllKilled` raises `AntigravityKillswitchError` (`packages/opencode/src/plugin/errors.ts`), intercepted at `packages/opencode/src/plugin/fetch-interceptor.ts:612-640` and returned as a synthetic error response.
 - **Cross-process lock contention** — `SidebarStateLockContentionError` after 2s of retries (`packages/opencode/src/sidebar-state.ts:154-164, 855-861`); the writer swallows it and the next attempt re-tries the merge.
-- **Process cancellation** — every long-running call honors `AbortSignal`; `connectTlsWithAbort` (`packages/core/src/agy-transport.ts:626-651`) races the TLS connect against the abort.
+- **Process cancellation** — every long-running call honors `AbortSignal`; the raw transport passes it directly into direct, proxy, and tunneled TLS sockets so cancellation destroys an in-flight connection immediately.
 
 The fundamental rule: **the user never sees a silent failure**. Either they see a toast, a synthetic error response, or the next account's attempt. The host's error reporting layer is never directly exposed to auth/quota failures.
 

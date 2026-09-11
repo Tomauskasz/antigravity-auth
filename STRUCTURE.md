@@ -1,6 +1,6 @@
 # Codebase Structure
 
-This document is the file-system map of the `@cortexkit/antigravity-auth*` monorepo at the v2.0 parity refactor. It describes the **tracked** source tree at code revision `397f654` — every listed file is an actual shipped path; directories such as `dist/`, `node_modules/`, `packages/opencode/src/tui-compiled/`, and per-agent working roots are tracked as `.gitignore`d but called out where relevant.
+This document is the file-system map of the `@cortexkit/antigravity-auth*` monorepo at the v2.0 parity refactor. It describes the **tracked** source tree at code revision `cd7a003` — every listed file is an actual shipped path; directories such as `dist/`, `node_modules/`, `packages/opencode/src/tui-compiled/`, and per-agent working roots are tracked as `.gitignore`d but called out where relevant.
 
 The stack has one business purpose (talk to the Google Antigravity `agy` CLI from non-Google harnesses) and three runtime surfaces (OpenCode server plugin, OpenTUI sidebar, Pi extension). These paragraphs are the only thing you have to read to navigate the tree:
 
@@ -66,7 +66,7 @@ The harness-agnostic core. Every export under `packages/core/src/index.ts:1-30` 
 - **`packages/core/src/account-storage.ts`** — durable JSON shape `AccountStorageV4` with `accounts[]`, `activeIndex`, `activeIndexByFamily`; migration v1→v4; lock-held read-modify-write via the fenced file lock.
 - **`packages/core/src/account-types.ts`** — pure types (`ManagedAccount`, `AccountSessionIdentity`, `RateLimitReason`, `CooldownReason`, `AccountStorageV4`).
 - **`packages/core/src/agy-request-metadata.ts`** — `buildAgyAgentRequestMetadata` (the labels block — `last_step_index`, `model_enum`, `trajectory_id`, `used_claude*`, `used_non_gemini_model`) and the per-workspace `AgyRequestSessionStore` registry.
-- **`packages/core/src/agy-transport.ts`** — bounded TLS socket pool, chunked + gzip body decode, idle-timeout watchdog. Hosts pass a `connectTlsWithAbort` factory through the dependency seam.
+- **`packages/core/src/agy-transport.ts`** — raw HTTP/1.1 TLS transport with direct and HTTPS-proxy connections, chunked + gzip body decoding, response-header and idle-timeout watchdogs, and socket-level `AbortSignal` propagation.
 - **`packages/core/src/antigravity/oauth.ts`** — `authorizeAntigravity`, `exchangeAntigravity`, `refreshAntigravityToken`. Owns PKCE pack/unpack, the `51121` callback URL constant, and the client metadata header.
 - **`packages/core/src/auth.ts`** — `parseRefreshParts`, `formatRefreshParts`, `accessTokenExpired` (60s buffer), refresh-token validity.
 - **`packages/core/src/auth-types.ts`** — packed/refresh token wire types.
