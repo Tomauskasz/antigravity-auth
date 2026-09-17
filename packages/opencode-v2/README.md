@@ -53,7 +53,6 @@ subpaths even for server-only packages; OpenCode 2 continues to render its nativ
 Install the adapter package itself (the shared core is pulled in automatically):
 
 ```bash
-# once the package is published:
 npm install @cortexkit/opencode-v2-antigravity-auth
 # or from this repository (Bun workspace):
 bun install

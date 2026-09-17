@@ -161,11 +161,15 @@ function waitForHead(
     const cleanup = (finish: () => void) => {
       socket.off('data', onData)
       socket.off('error', onError)
+      socket.off('end', onClosed)
+      socket.off('close', onClosed)
       clearTimeout(timeout)
       finish()
     }
 
     const onError = (error: Error) => cleanup(() => reject(error))
+    const onClosed = () =>
+      cleanup(() => reject(new Error('Socket closed before response headers')))
     const onData = (chunk: Buffer) => {
       buffer = Buffer.concat([buffer, chunk])
       const marker = buffer.indexOf('\r\n\r\n')
@@ -177,6 +181,8 @@ function waitForHead(
 
     socket.on('data', onData)
     socket.once('error', onError)
+    socket.once('end', onClosed)
+    socket.once('close', onClosed)
   })
 }
 

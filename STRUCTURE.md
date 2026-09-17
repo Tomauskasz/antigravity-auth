@@ -69,7 +69,7 @@ The harness-agnostic core. Every export under `packages/core/src/index.ts` is gr
 - **`packages/core/src/account-storage.ts`** — durable JSON shape `AccountStorageV4` with `accounts[]`, `activeIndex`, `activeIndexByFamily`; migration v1→v4; lock-held read-modify-write via the fenced file lock.
 - **`packages/core/src/account-types.ts`** — pure types (`ManagedAccount`, `AccountSessionIdentity`, `RateLimitReason`, `CooldownReason`, `AccountStorageV4`).
 - **`packages/core/src/agy-request-metadata.ts`** — `buildAgyAgentRequestMetadata` (the labels block — `last_step_index`, `model_enum`, `trajectory_id`, `used_claude*`, `used_non_gemini_model`) and the per-workspace `AgyRequestSessionStore` registry.
-- **`packages/core/src/agy-transport.ts`** — raw HTTP/1.1 TLS transport with direct and HTTPS-proxy connections, chunked + gzip body decoding, response-header and idle-timeout watchdogs, and socket-level `AbortSignal` propagation.
+- **`packages/core/src/agy-transport.ts`** — raw HTTP/1.1 TLS transport with direct and HTTPS-proxy connections, chunked + gzip body decoding, response-header and idle-timeout watchdogs, immediate rejection when a peer closes before response headers, and socket-level `AbortSignal` propagation.
 - **`packages/core/src/antigravity/oauth.ts`** — `authorizeAntigravity`, `exchangeAntigravity`, `refreshAntigravityToken`. Owns PKCE pack/unpack, the `51121` callback URL constant, and the client metadata header.
 - **`packages/core/src/auth.ts`** — `parseRefreshParts`, `formatRefreshParts`, `accessTokenExpired` (60s buffer), refresh-token validity.
 - **`packages/core/src/auth-types.ts`** — packed/refresh token wire types.
@@ -122,7 +122,7 @@ The `src/tui-compiled/` directory lives under `src/` but is **gitignored** — s
 
 ### Server plugin (`packages/opencode/src/`)
 
-- `packages/opencode/src/index.ts` — top-level barrel re-exporting `AntigravityCLIOAuthPlugin` and `GoogleOAuthPlugin` from `plugin/index.ts`.
+- `packages/opencode/index.ts` — top-level barrel re-exporting `AntigravityCLIOAuthPlugin` and `GoogleOAuthPlugin` from `plugin/index.ts`.
 - `packages/opencode/src/cli.ts` — standalone CLI binary entry (the `bin` field of `package.json`); the build step bundles it to `dist/cli.js`.
 - `packages/opencode/src/antigravity/oauth.ts` — host-thin re-export / extension shim around `core/antigravity/oauth.ts` (used by the CLI's `OAuthLoginRequest`).
 - `packages/opencode/src/constants.ts` — plugin-level constants: command names (`ANTIGRAVITY_*_COMMAND_NAME`), modal command constants, `MODAL_COMMANDS`.
@@ -265,10 +265,12 @@ The TUI is a thin Solid sidebar that polls a redacted snapshot file and a loopba
 
 - `packages/opencode-v2/src/plugin.ts` — `createOpenCodeV2AntigravityPlugin`; registers the request hook and OAuth integration, owns the ephemeral loopback bridge, delegates account/transport/model behavior to core, transforms outbound AGY envelopes, and converts terminal/embedded stream failures into native host errors.
 - `packages/opencode-v2/src/oauth-callback.ts` — loopback OAuth callback listener used by the integration method.
-- `packages/opencode-v2/package.json` — publishes only compiled `dist/`, exposes `.` and `./server`, and declares `oc-plugin: ['server']` for `Host.resolve()`.
+- `packages/opencode-v2/src/tui.ts` — inert TUI compatibility export satisfying OpenCode 2's cross-platform package resolver probing without registering a second render surface.
+- `packages/opencode-v2/src/rpc.ts` — inert RPC compatibility export satisfying OpenCode 2's cross-platform package resolver probing without registering RPC handlers.
+- `packages/opencode-v2/package.json` — publishes only compiled `dist/`, exposes `.`, `./server`, `./tui`, and `./rpc`, and declares `oc-plugin: ['server']` for `Host.resolve()`.
 - `packages/opencode-v2/tsconfig.json`, `tsconfig.build.json` — strict no-emit and declaration-producing build configurations.
 - `packages/opencode-v2/test/{plugin,request,package-manifest}.test.ts` — plugin contract/title routing, final-wire invariants, image-model sanitization, and host manifest resolution.
-- `packages/opencode-v2/scripts/smoke-pack-install.ts` — packs core and the adapter, installs both into a clean consumer, resolves the server through the real OpenCode 2 host resolver, and imports the installed entry.
+- `packages/opencode-v2/scripts/smoke-pack-install.ts` — packs core and the adapter, installs both into a clean consumer, resolves the server, inert TUI, and inert RPC entries through the real OpenCode 2 host resolver, and imports the installed entries.
 - `packages/opencode-v2/example/opencode.json` — complete OpenCode 2 provider/model configuration.
 
 ## `packages/pi` inventory
@@ -310,7 +312,7 @@ The TUI is a thin Solid sidebar that polls a redacted snapshot file and a loopba
 - `packages/e2e-tests/src/fetch-guard.test.ts` — pins the loopback-only `globalThis.fetch` guard: loopback URLs pass through, non-loopback URLs throw `LiveNetworkDeniedError`, the guard is restored in `afterEach`.
 - `packages/e2e-tests/src/opencode-v2-harness.ts` — launches the pinned real OpenCode 2 binary with an explicit `OPENCODE_DB` inside the test root, a loopback-only provider/mock route, injected core dependencies, and request recording.
 - `packages/e2e-tests/src/opencode-v2-flow.e2e.test.ts` — verifies real host loading, model and title routing, AGY request invariants, private image output, ineligible-account persistence and failover, bounded endpoint fallbacks, embedded SSE errors, and terminal EOF failures.
-- `packages/e2e-tests/docker/run-opencode-v2-test.sh` + `docker/opencode-v2/Dockerfile` — build the pinned Linux host harness and run that suite with `--network none`; CI/release use this clean-room gate.
+- `packages/e2e-tests/docker/run-opencode-v2-test.sh` + `packages/e2e-tests/docker/opencode-v2/Dockerfile` — build the pinned Linux host harness and run that suite with `--network none`; CI/release use this clean-room gate.
 - Unit tests under this workspace: `mock-antigravity-server.test.ts`, `process-runner.test.ts`, `setup.cleanup.test.ts`.
 - Run via `bun run test:e2e` at the repo root (delegates to `bun test --isolate ./packages/e2e-tests/src/plugin-flow.e2e.test.ts ./packages/e2e-tests/src/cli-flow.e2e.test.ts ./packages/e2e-tests/src/rpc-tui-flow.e2e.test.ts ./packages/e2e-tests/src/fetch-guard.test.ts ./packages/e2e-tests/src/mock-antigravity-server.test.ts`).
 
@@ -366,7 +368,7 @@ Project-wide tsconfig used by `bun run typecheck` (root script `typecheck`) for 
 | `@cortexkit/opencode-v2-antigravity-auth` | `packages/opencode-v2/src/plugin.ts` → `dist/plugin.js` | default plugin + `createOpenCodeV2AntigravityPlugin` | OpenCode 2 Promise-plugin server entry discovered through `oc-plugin: ['server']`. |
 | `@cortexkit/pi-antigravity-auth` | `packages/pi/src/index.ts` | `default function` | Pi extension. Resolves as `pi.extensions: ['./dist/index.js']` per `packages/pi/package.json`. |
 
-The `exports` map at `packages/opencode/package.json` declares both `.` (the bundled server root) and `./tui` (the OpenTUI loader). The host's `opencode plugin` installer reads the subpaths and writes a server entry to `opencode.json` plus a TUI entry to `tui.json`; the host then resolves them as two independent plugin registrations.
+The `exports` map at `packages/opencode/package.json` declares both `.` (the bundled server root) and `./tui` (the OpenTUI loader). The host's `opencode plugin` installer reads the subpaths and writes a server entry to `opencode.json` plus a TUI entry to `tui.json`; the host then resolves them as two independent plugin registrations. `packages/opencode-v2/package.json` declares `.`, `./server`, `./tui`, and `./rpc`; OpenCode 2's `Host.resolve()` resolves `./server` for the server plugin runtime, while the inert `./tui` and `./rpc` subpaths satisfy cross-platform resolver probing.
 
 ## Generated and ignored artifacts
 

@@ -47,7 +47,6 @@ OpenCode 2 跨平台包解析器对这些子路径的探测；界面仍由 OpenC
 ## 安装
 
 ```bash
-# 包发布后：
 npm install @cortexkit/opencode-v2-antigravity-auth
 # 或从本仓库（Bun workspace）：
 bun install

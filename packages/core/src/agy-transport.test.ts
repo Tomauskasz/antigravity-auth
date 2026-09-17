@@ -319,6 +319,31 @@ describe('agy transport', () => {
     }
   })
 
+  it('rejects promptly when the peer closes before response headers', async () => {
+    const probe = createSocketProbe((socket) => {
+      socket.end()
+    })
+    const port = await listen(probe.server, '127.0.0.1')
+    setProxyEnv(port)
+    const request = fetchWithAgyCliTransport(
+      'https://example.com/v1internal:streamGenerateContent',
+      { method: 'POST', body: '{}' },
+      { timeoutMs: 750 },
+    ).catch((error: unknown) => error)
+
+    try {
+      expect(await resolvesWithin(request, 250)).toBe(true)
+      const error = await request
+      expect(error).toBeInstanceOf(Error)
+      expect((error as Error).message).toContain(
+        'Socket closed before response headers',
+      )
+    } finally {
+      await closeSocketProbe(probe)
+      await request
+    }
+  })
+
   describe('ContentLengthStream', () => {
     it('emits exactly contentLength bytes and ends', async () => {
       const out = await collect(new ContentLengthStream(5), [

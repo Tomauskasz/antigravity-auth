@@ -45,7 +45,7 @@ graph LR
   E2E --> Core
 ```
 
-`packages/opencode/package.json` exposes the OpenCode 1 server and TUI subpaths. `packages/opencode-v2/package.json` publishes compiled `dist/plugin.js`, declares `oc-plugin: ['server']`, and exposes the `./server` subpath required by OpenCode 2's real `Host.resolve()` path. The Pi package's `pi.extensions` field is the analogous host entry. Both OpenCode adapters and Pi depend one-way on core.
+`packages/opencode/package.json` exposes the OpenCode 1 server and TUI subpaths. `packages/opencode-v2/package.json` publishes compiled `dist/plugin.js`, declares `oc-plugin: ['server']`, and exposes the `./server` subpath required by OpenCode 2's real `Host.resolve()` path alongside inert `./tui` and `./rpc` subpaths that satisfy cross-platform resolver probing. The Pi package's `pi.extensions` field is the analogous host entry. Both OpenCode adapters and Pi depend one-way on core.
 
 ### Process topology at runtime
 
@@ -218,6 +218,8 @@ The OpenCode 2 adapter preserves the same wire invariants as OpenCode 1: final r
 The adapter uses the shared v4 `antigravity-accounts.json` pool. `ACCOUNT_INELIGIBLE` and `VALIDATION_REQUIRED` responses persist the corresponding disabled account state before rotation. Generic HTTP 403 responses do not masquerade as rate limits. Stream EOF without a terminal candidate, embedded SSE errors, and exhausted transport fallbacks surface through OpenCode's native error path rather than becoming successful assistant text.
 
 `createOpenCodeV2AntigravityPlugin(overrides)` is the test seam. Production uses core defaults; deterministic tests inject OAuth/project/transport functions while retaining the production loopback and host-hook pipeline. Disposal unregisters host hooks, clears pending jobs and timers, aborts active requests, closes all loopback connections, clears session metadata, and disposes the account manager.
+
+The `oc-plugin` manifest enables only the server entry (`packages/opencode-v2/src/plugin.ts`). OpenCode 2's cross-platform host resolver also probes `./tui` and `./rpc` subpaths even for server-only packages; the package exports inert placeholders (`packages/opencode-v2/src/tui.ts`, `packages/opencode-v2/src/rpc.ts`) to satisfy resolver discovery while leaving UI rendering to OpenCode 2's native provider UI.
 
 ## OpenTUI process and trust boundary
 
@@ -595,7 +597,7 @@ The stack has three distinct timeout systems, **deliberately separated**:
 | AGY response header timeout | **180s** | TLS connect + response headers via raw socket | `packages/core/src/agy-transport.ts:12` |
 | AGY idle timeout | **180s** | Stalled response body — kills the socket if no bytes for 180s | `packages/core/src/agy-transport.ts:16` |
 
-The 15s `ACTIVE_FETCH_TIMEOUT_MS` is stream-safe: it only aborts the request signal until the underlying `fetchImpl` resolves, then removes the timeout listener so the returned body can be streamed past the deadline (`packages/core/src/fetch-timeout.ts:28-54`). The 180s `DEFAULT_AGY_RESPONSE_HEADER_TIMEOUT_MS` covers the Antigravity `agy` CLI's own connect behavior, and the 180s `DEFAULT_AGY_IDLE_TIMEOUT_MS` is a watchdog against a hung body — it resets on every received chunk (lines 518-531 in `agy-transport.ts`). The two are independent: a slow but streaming response triggers neither.
+The 15s `ACTIVE_FETCH_TIMEOUT_MS` is stream-safe: it only aborts the request signal until the underlying `fetchImpl` resolves, then removes the timeout listener so the returned body can be streamed past the deadline (`packages/core/src/fetch-timeout.ts:28-54`). The 180s `DEFAULT_AGY_RESPONSE_HEADER_TIMEOUT_MS` covers the Antigravity `agy` CLI's own connect behavior, and the 180s `DEFAULT_AGY_IDLE_TIMEOUT_MS` is a watchdog against a hung body — it resets on every received chunk (lines 518-531 in `agy-transport.ts`). The response-head waiter rejects immediately when a connected peer emits `end` or `close` before sending complete HTTP headers; otherwise each endpoint/account fallback would consume the full 180-second header timeout after the socket was already gone. The two timeout systems are independent: a slow but streaming response triggers neither.
 
 ```mermaid
 gantt
@@ -741,7 +743,7 @@ The snapshot is the only place the TUI meets the live pool. The redaction is a s
 | AgyRequestSessionStore | `packages/core/src/agy-request-metadata.ts` | 24h TTL or 256 entries, whichever lands first |
 | Managed project context | `packages/core/src/project.ts` | 30-minute TTL keyed by the stable bare refresh token, independent of packed project fields |
 | Sidebar routing map | `packages/opencode/src/sidebar-state.ts:136-138` | 24h max age, max 100 entries |
-| Account manager session state | `packages/core/src/account-manager.ts:535-561` | 24h TTL or 256 entries |
+| Account manager session state | `packages/core/src/account-manager.ts:567-620` | 24h TTL or 256 entries |
 
 ### Randomness
 
@@ -851,6 +853,6 @@ These invariants are enforced by tests and should not be relaxed:
 10. **Every outbound request must end in a user turn.** After sanitization and recovery, request preparation appends `[Continue]` when the final `contents` role is model or assistant because Antigravity rejects model-ending requests.
 11. **The Pi extension's package-name contract is `pi.extensions`.** `packages/pi/package.json:34-38` is the source-of-truth; the extension's name (`@cortexkit/pi-antigravity-auth`) is what the user's Pi config references.
 12. **OpenCode 2 host tests always set an isolated `OPENCODE_DB`.** No OpenCode 2 process may run against the developer's default database during tests.
-13. **The OpenCode 2 package must resolve after packing.** `scripts/smoke-pack-install.ts` installs the tarballs into a clean consumer and verifies the real `Host.resolve()` server entry; direct source imports are not sufficient release evidence.
+13. **The OpenCode 2 package must resolve after packing.** `packages/opencode-v2/scripts/smoke-pack-install.ts` installs the tarballs into a clean consumer and verifies the real `Host.resolve()` server entry alongside inert TUI and RPC compatibility exports; direct source imports are not sufficient release evidence.
 
 The architecture is intentionally layered so the next harness (a CLI, a VS Code plugin, a Web extension) can plug in at the `core` boundary or the `opencode` boundary depending on whether it has its own fetch primitive.
