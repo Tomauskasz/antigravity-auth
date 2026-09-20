@@ -1,4 +1,8 @@
-import { fetchWithAgyCliTransport } from '@cortexkit/antigravity-auth-core'
+import {
+  ACTIVE_FETCH_TIMEOUT_MS,
+  fetchWithActiveTimeout,
+  fetchWithAgyCliTransport,
+} from '@cortexkit/antigravity-auth-core'
 import { ANTIGRAVITY_ENDPOINT_FALLBACKS } from '../constants'
 import {
   type SidebarRoutingEntry,
@@ -76,6 +80,12 @@ const log = createLogger('fetch-interceptor')
  * Matches the legacy plugin so callers that compare timing logs see parity.
  */
 const FIRST_RETRY_DELAY_MS = 1000
+
+/** Never let a single silent endpoint consume the full request budget. */
+const activeTransportTimeoutMs = (remainingMs?: number): number =>
+  remainingMs === undefined
+    ? ACTIVE_FETCH_TIMEOUT_MS
+    : Math.max(1, Math.min(ACTIVE_FETCH_TIMEOUT_MS, remainingMs))
 
 /** Production transport — used when the interceptor context omits one. */
 const defaultAgyTransport: AgyTransport = (url, init, options) =>
@@ -469,11 +479,51 @@ export function createFetchInterceptor(
     let lastFailure: FailureContext | null = null
     let lastError: Error | null = null
     const abortSignal = init?.signal ?? undefined
+    const maxWaitMs = (config.max_rate_limit_wait_seconds ?? 300) * 1000
+    const deadlineStartedAt = Date.now()
+    const deadlineError = new Error(
+      'Antigravity request timed out before receiving response headers.',
+    )
+    const deadlineController = maxWaitMs > 0 ? new AbortController() : undefined
+    const deadlineTimer = deadlineController
+      ? setTimeout(() => deadlineController.abort(deadlineError), maxWaitMs)
+      : undefined
+    deadlineTimer?.unref?.()
+    const requestSignal = deadlineController
+      ? abortSignal
+        ? AbortSignal.any([abortSignal, deadlineController.signal])
+        : deadlineController.signal
+      : abortSignal
+    const clearRequestDeadline = () => {
+      if (deadlineTimer) clearTimeout(deadlineTimer)
+    }
+    const stopRequestDeadline = () => {
+      clearRequestDeadline()
+      abortSignal?.removeEventListener('abort', clearRequestDeadline)
+    }
+    deadlineController?.signal.addEventListener('abort', stopRequestDeadline, {
+      once: true,
+    })
+    if (abortSignal?.aborted) {
+      clearRequestDeadline()
+    } else {
+      abortSignal?.addEventListener('abort', clearRequestDeadline, {
+        once: true,
+      })
+    }
+    const getActiveTransportTimeoutMs = () => {
+      if (!deadlineController) return ACTIVE_FETCH_TIMEOUT_MS
+      const remainingMs = maxWaitMs - (Date.now() - deadlineStartedAt)
+      if (remainingMs <= 0) throw deadlineError
+      return activeTransportTimeoutMs(remainingMs)
+    }
+    const withRequestSignal = (requestInit: RequestInit): RequestInit =>
+      requestSignal ? { ...requestInit, signal: requestSignal } : requestInit
 
     const checkAborted = () => {
-      if (abortSignal?.aborted) {
-        throw abortSignal.reason instanceof Error
-          ? abortSignal.reason
+      if (requestSignal?.aborted) {
+        throw requestSignal.reason instanceof Error
+          ? requestSignal.reason
           : new Error('Aborted')
       }
     }
@@ -505,7 +555,7 @@ export function createFetchInterceptor(
       })
 
       if (quietMode) return
-      if (abortSignal?.aborted) return
+      if (requestSignal?.aborted) return
 
       if (toastScope === 'root_only' && isChildRequest) {
         log.debug('toast-suppressed-child-session', {
@@ -767,7 +817,7 @@ export function createFetchInterceptor(
             retryState.markSoftQuotaToastShown()
           }
 
-          await sleep(softQuotaWaitMs, abortSignal)
+          await sleep(softQuotaWaitMs, requestSignal)
           continue
         }
 
@@ -816,7 +866,7 @@ export function createFetchInterceptor(
           retryState.markRateLimitToastShown()
         }
 
-        await sleep(waitMs, abortSignal)
+        await sleep(waitMs, requestSignal)
         continue
       }
 
@@ -870,6 +920,7 @@ export function createFetchInterceptor(
             authRecord,
             client,
             providerId,
+            requestSignal,
           )
           if (!refreshed) {
             const { failures, shouldCooldown, cooldownMs } =
@@ -928,7 +979,12 @@ export function createFetchInterceptor(
               try {
                 await client.auth.set({
                   path: { id: providerId },
-                  body: { type: 'oauth', refresh: '', access: '', expires: 0 },
+                  body: {
+                    type: 'oauth',
+                    refresh: '',
+                    access: '',
+                    expires: 0,
+                  },
                 })
               } catch (storeError) {
                 log.error(
@@ -988,7 +1044,10 @@ export function createFetchInterceptor(
 
       let projectContext: ProjectContextResult
       try {
-        projectContext = await ensureProjectContext(authRecord)
+        projectContext = await ensureProjectContext(authRecord, {
+          signal: requestSignal,
+          timeoutMs: getActiveTransportTimeoutMs(),
+        })
         retryState.resetAccountFailureState(account.index)
       } catch (error) {
         const { failures, shouldCooldown, cooldownMs } =
@@ -1074,11 +1133,19 @@ export function createFetchInterceptor(
           pushDebug('thinking-warmup: start')
           const warmupResponse =
             prepared.headerStyle === 'antigravity'
-              ? await transport(warmupUrl, warmupInit, {
-                  signal: abortSignal,
+              ? await transport(warmupUrl, withRequestSignal(warmupInit), {
+                  signal: requestSignal,
+                  timeoutMs: getActiveTransportTimeoutMs(),
                   onDebug: pushDebug,
                 })
-              : await upstreamFetch(warmupUrl, warmupInit)
+              : await fetchWithActiveTimeout(
+                  warmupUrl,
+                  withRequestSignal(warmupInit),
+                  {
+                    timeoutMs: getActiveTransportTimeoutMs(),
+                    fetchImpl: upstreamFetch,
+                  },
+                )
           const transformed = await transformAntigravityResponse(
             warmupResponse,
             true,
@@ -1122,11 +1189,23 @@ export function createFetchInterceptor(
           }
           const probeResponse =
             prepared.headerStyle === 'antigravity'
-              ? await transport(toUrlString(prepared.request), probeInit, {
-                  signal: abortSignal,
-                  onDebug: pushDebug,
-                })
-              : await upstreamFetch(toUrlString(prepared.request), probeInit)
+              ? await transport(
+                  toUrlString(prepared.request),
+                  withRequestSignal(probeInit),
+                  {
+                    signal: requestSignal,
+                    timeoutMs: getActiveTransportTimeoutMs(),
+                    onDebug: pushDebug,
+                  },
+                )
+              : await fetchWithActiveTimeout(
+                  toUrlString(prepared.request),
+                  withRequestSignal(probeInit),
+                  {
+                    timeoutMs: getActiveTransportTimeoutMs(),
+                    fetchImpl: upstreamFetch,
+                  },
+                )
 
           if (probeResponse.body) {
             const reader = probeResponse.body.getReader()
@@ -1341,7 +1420,7 @@ export function createFetchInterceptor(
                 Math.random() * config.request_jitter_max_ms,
               )
               if (jitterMs > 0) {
-                await sleep(jitterMs, abortSignal)
+                await sleep(jitterMs, requestSignal)
               }
             }
 
@@ -1356,10 +1435,22 @@ export function createFetchInterceptor(
               prepared.headerStyle === 'antigravity'
                 ? await transport(
                     toUrlString(prepared.request),
-                    prepared.init,
-                    { signal: abortSignal, onDebug: pushDebug },
+                    withRequestSignal(prepared.init),
+                    {
+                      signal: requestSignal,
+                      timeoutMs: getActiveTransportTimeoutMs(),
+                      onDebug: pushDebug,
+                    },
                   )
-                : await upstreamFetch(prepared.request, prepared.init)
+                : await fetchWithActiveTimeout(
+                    prepared.request,
+                    withRequestSignal(prepared.init),
+                    {
+                      timeoutMs: getActiveTransportTimeoutMs(),
+                      fetchImpl: upstreamFetch,
+                    },
+                  )
+            if (response.ok) stopRequestDeadline()
             apiRequestCount++
             accountManager.recordRequest(account.index, family)
             const requestCounts = accountManager.getDailyRequestCounts(
@@ -1470,7 +1561,7 @@ export function createFetchInterceptor(
                   'warning',
                 )
 
-                await sleep(waitMs, abortSignal)
+                await sleep(waitMs, requestSignal)
 
                 if (capacityRetryCount < 1) {
                   capacityRetryCount++
@@ -1538,7 +1629,7 @@ export function createFetchInterceptor(
                 rateLimitReason !== 'QUOTA_EXHAUSTED'
               ) {
                 await showToast(`Rate limited. Quick retry in 1s...`, 'warning')
-                await sleep(FIRST_RETRY_DELAY_MS, abortSignal)
+                await sleep(FIRST_RETRY_DELAY_MS, requestSignal)
 
                 if (config.scheduling_mode === 'cache_first') {
                   const maxCacheFirstWaitMs =
@@ -1559,7 +1650,7 @@ export function createFetchInterceptor(
                       rateLimitReason,
                       serverRetryMs,
                     )
-                    await sleep(effectiveDelayMs, abortSignal)
+                    await sleep(effectiveDelayMs, requestSignal)
                     i -= 1
                     continue
                   }
@@ -1609,7 +1700,7 @@ export function createFetchInterceptor(
                       `Rate limited again. Switching account in ${formatWaitTime(switchAccountDelayMs)}...`,
                       'warning',
                     )
-                    await sleep(switchAccountDelayMs, abortSignal)
+                    await sleep(switchAccountDelayMs, requestSignal)
                     shouldSwitchAccount = true
                     break
                   }
@@ -1672,7 +1763,7 @@ export function createFetchInterceptor(
                   `Rate limited again. Switching account in ${formatWaitTime(switchAccountDelayMs)}...${quotaMsg}`,
                   'warning',
                 )
-                await sleep(switchAccountDelayMs, abortSignal)
+                await sleep(switchAccountDelayMs, requestSignal)
               } else {
                 const expBackoffMs = Math.min(
                   FIRST_RETRY_DELAY_MS * 2 ** (backoff.attempt - 1),
@@ -1686,7 +1777,7 @@ export function createFetchInterceptor(
                   `Rate limited. Retrying in ${expBackoffFormatted} (attempt ${backoff.attempt})...`,
                   'warning',
                 )
-                await sleep(expBackoffMs, abortSignal)
+                await sleep(expBackoffMs, requestSignal)
               }
 
               lastFailure = createFailureContext(response)
@@ -1849,6 +1940,7 @@ export function createFetchInterceptor(
               await logResponseBody(debugContext, response, response.status)
             }
             if (!response.ok) {
+              stopRequestDeadline()
               await logResponseBody(debugContext, response, response.status)
 
               if (response.status === 400) {
@@ -1892,7 +1984,7 @@ export function createFetchInterceptor(
                     `Empty response received. Retrying (${currentAttempts}/${maxAttempts})...`,
                     'warning',
                   )
-                  await sleep(retryDelayMs, abortSignal)
+                  await sleep(retryDelayMs, requestSignal)
                   continue
                 }
 
@@ -1986,6 +2078,7 @@ export function createFetchInterceptor(
 
             return transformedResponse
           } catch (error) {
+            checkAborted()
             if (tokenConsumed) {
               getTokenTracker().refund(account.index)
               tokenConsumed = false

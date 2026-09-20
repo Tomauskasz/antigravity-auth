@@ -538,6 +538,139 @@ describe('createFetchInterceptor', () => {
       expect(transportMock).toHaveBeenCalledTimes(2)
       interceptor.dispose()
     })
+
+    it('fails a silent transport within the configured pre-response budget', async () => {
+      const deadlineError = new Error('silent transport aborted')
+      const silentTransport: AgyTransport = async (_url, _init, options) =>
+        new Promise<Response>((_resolve, reject) => {
+          options?.signal?.addEventListener(
+            'abort',
+            () => reject(options.signal?.reason ?? deadlineError),
+            { once: true },
+          )
+        })
+      const context = await makeContext({
+        agyTransport: silentTransport,
+        config: {
+          ...DEFAULT_CONFIG,
+          max_rate_limit_wait_seconds: 0.01,
+          request_jitter_max_ms: 0,
+        },
+      })
+      const interceptor = createFetchInterceptor(context)
+
+      await expect(
+        interceptor.fetch(GENERATIVE_URL, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ contents: [] }),
+        }),
+      ).rejects.toThrow('timed out before receiving response headers')
+      interceptor.dispose()
+    })
+
+    it('keeps the deadline active across a retryable response', async () => {
+      transportHandler = async () =>
+        new Response(
+          JSON.stringify({
+            error: { message: 'try again', status: 'RESOURCE_EXHAUSTED' },
+          }),
+          { status: 429, headers: { 'content-type': 'application/json' } },
+        )
+      const context = await makeContext({
+        config: {
+          ...DEFAULT_CONFIG,
+          max_rate_limit_wait_seconds: 0.01,
+          request_jitter_max_ms: 0,
+        },
+      })
+      const interceptor = createFetchInterceptor(context)
+
+      await expect(
+        interceptor.fetch(GENERATIVE_URL, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ contents: [] }),
+        }),
+      ).rejects.toThrow('timed out before receiving response headers')
+      interceptor.dispose()
+    })
+
+    it('keeps a stream readable after its response headers clear the deadline', async () => {
+      let requestSignal: AbortSignal | null | undefined
+      const streamingTransport: AgyTransport = async (_url, _init, options) => {
+        requestSignal = options?.signal
+        return new Response(
+          new ReadableStream({
+            start(controller) {
+              setTimeout(() => {
+                controller.enqueue(
+                  new TextEncoder().encode(
+                    'data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"done"}]}}]}}\n\n',
+                  ),
+                )
+                controller.close()
+              }, 20)
+            },
+          }),
+          { status: 200, headers: { 'content-type': 'text/event-stream' } },
+        )
+      }
+      const context = await makeContext({
+        agyTransport: streamingTransport,
+        config: {
+          ...DEFAULT_CONFIG,
+          max_rate_limit_wait_seconds: 0.01,
+          request_jitter_max_ms: 0,
+        },
+      })
+      const interceptor = createFetchInterceptor(context)
+
+      const response = await interceptor.fetch(GENERATIVE_URL, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ contents: [] }),
+      })
+
+      expect(await response.text()).toContain('done')
+      expect(requestSignal?.aborted).toBeFalse()
+      interceptor.dispose()
+    })
+
+    it('leaves the request unbounded when the budget is zero', async () => {
+      const controller = new AbortController()
+      let requestSignal: AbortSignal | null | undefined
+      const silentTransport: AgyTransport = async (_url, _init, options) =>
+        new Promise<Response>((_resolve, reject) => {
+          requestSignal = options?.signal
+          options?.signal?.addEventListener(
+            'abort',
+            () => reject(options.signal?.reason),
+            { once: true },
+          )
+        })
+      const context = await makeContext({
+        agyTransport: silentTransport,
+        config: {
+          ...DEFAULT_CONFIG,
+          max_rate_limit_wait_seconds: 0,
+          request_jitter_max_ms: 0,
+        },
+      })
+      const interceptor = createFetchInterceptor(context)
+      const pending = interceptor.fetch(GENERATIVE_URL, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ contents: [] }),
+        signal: controller.signal,
+      })
+
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      expect(requestSignal?.aborted).toBeFalse()
+      controller.abort(new Error('caller cancelled'))
+      await expect(pending).rejects.toThrow('caller cancelled')
+      interceptor.dispose()
+    })
   })
 
   describe('per-instance isolation', () => {
