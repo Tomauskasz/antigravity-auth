@@ -597,7 +597,7 @@ describe('createFetchInterceptor', () => {
       interceptor.dispose()
     })
 
-    it('switches accounts when a stream does not produce its first byte', async () => {
+    it('switches accounts when a response body does not produce its first byte', async () => {
       const accountManager = new AccountManager(undefined, {
         version: 4,
         accounts: [
@@ -633,7 +633,7 @@ describe('createFetchInterceptor', () => {
         seenAuthorizations.push(authorization)
         if (authorization === 'Bearer access-a') {
           return new Response(new ReadableStream({ start() {} }), {
-            status: 200,
+            status: 503,
             headers: { 'content-type': 'text/event-stream' },
           })
         }

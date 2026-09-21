@@ -180,9 +180,9 @@ async function readFirstResponseByte(
 }
 
 /**
- * Wait for the first streaming byte before returning control to OpenCode.
- * That keeps a per-dispatch deadline active across the otherwise invisible
- * headers-only state, while replaying the byte to the normal SSE transformer.
+ * Wait for the first response byte before returning control to OpenCode.
+ * That keeps a per-dispatch deadline active across an otherwise invisible
+ * headers-only state, while replaying the byte to the normal transformer.
  */
 async function primeStreamingResponse(
   response: Response,
@@ -1568,12 +1568,7 @@ export function createFetchInterceptor(
                         },
                       ),
                     )
-              if (response.ok) {
-                response = await primeStreamingResponse(
-                  response,
-                  activeDeadline,
-                )
-              }
+              response = await primeStreamingResponse(response, activeDeadline)
             } finally {
               activeDeadline.clear()
             }
