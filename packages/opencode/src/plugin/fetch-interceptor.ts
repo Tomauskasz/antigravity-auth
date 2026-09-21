@@ -81,11 +81,148 @@ const log = createLogger('fetch-interceptor')
  */
 const FIRST_RETRY_DELAY_MS = 1000
 
-/** Never let a single silent endpoint consume the full request budget. */
+/** Never let a single response wait exceed the active transport budget. */
 const activeTransportTimeoutMs = (remainingMs?: number): number =>
   remainingMs === undefined
     ? ACTIVE_FETCH_TIMEOUT_MS
     : Math.max(1, Math.min(ACTIVE_FETCH_TIMEOUT_MS, remainingMs))
+
+const RESPONSE_TIMEOUT_MESSAGE =
+  'Antigravity request timed out before receiving usable response data.'
+
+interface DispatchDeadline {
+  readonly signal: AbortSignal | undefined
+  readonly expired: boolean
+  race<T>(operation: Promise<T>): Promise<T>
+  clear(): void
+}
+
+function createDispatchDeadline(
+  callerSignal: AbortSignal | undefined,
+  waitMs: number,
+): DispatchDeadline {
+  if (waitMs <= 0) {
+    return {
+      signal: callerSignal,
+      expired: false,
+      race: (operation) => operation,
+      clear: () => {},
+    }
+  }
+
+  const controller = new AbortController()
+  let expired = false
+  let settled = false
+  let rejectDeadline: (reason: Error) => void
+  const deadline = new Promise<never>((_resolve, reject) => {
+    rejectDeadline = reject
+  })
+  // A non-streaming response can clear the deadline without awaiting this
+  // promise. Keep that normal path from producing an unhandled rejection if a
+  // caller cancels immediately afterwards.
+  void deadline.catch(() => {})
+
+  const abort = (reason: Error, didExpire: boolean) => {
+    if (settled) return
+    settled = true
+    expired = didExpire
+    controller.abort(reason)
+    rejectDeadline(reason)
+  }
+  const onCallerAbort = () => {
+    abort(
+      callerSignal ? abortReason(callerSignal) : new Error('Aborted'),
+      false,
+    )
+  }
+  const timeout = setTimeout(() => {
+    abort(new Error(RESPONSE_TIMEOUT_MESSAGE), true)
+  }, waitMs)
+
+  const clear = () => {
+    clearTimeout(timeout)
+    callerSignal?.removeEventListener('abort', onCallerAbort)
+    settled = true
+  }
+  if (callerSignal?.aborted) {
+    onCallerAbort()
+  } else {
+    callerSignal?.addEventListener('abort', onCallerAbort, { once: true })
+  }
+
+  return {
+    signal: controller.signal,
+    get expired() {
+      return expired
+    },
+    race: (operation) => Promise.race([operation, deadline]),
+    clear,
+  }
+}
+
+function abortReason(signal: AbortSignal): Error {
+  return signal.reason instanceof Error ? signal.reason : new Error('Aborted')
+}
+
+async function readFirstResponseByte(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  deadline: DispatchDeadline,
+): Promise<Uint8Array> {
+  while (true) {
+    const { done, value } = await deadline.race(reader.read())
+    if (done) {
+      throw new Error(
+        'Antigravity stream ended before producing response data.',
+      )
+    }
+    if (value.byteLength > 0) return value
+  }
+}
+
+/**
+ * Wait for the first streaming byte before returning control to OpenCode.
+ * That keeps a per-dispatch deadline active across the otherwise invisible
+ * headers-only state, while replaying the byte to the normal SSE transformer.
+ */
+async function primeStreamingResponse(
+  response: Response,
+  deadline: DispatchDeadline,
+): Promise<Response> {
+  if (!response.body) return response
+
+  const reader = response.body.getReader()
+  let bufferedChunk = await readFirstResponseByte(reader, deadline)
+  const replay = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      if (bufferedChunk) {
+        const chunk = bufferedChunk
+        bufferedChunk = undefined
+        controller.enqueue(chunk)
+        return
+      }
+
+      try {
+        const { done, value } = await reader.read()
+        if (done) {
+          controller.close()
+          return
+        }
+        controller.enqueue(value)
+      } catch (error) {
+        controller.error(error)
+      }
+    },
+    cancel(reason) {
+      return reader.cancel(reason)
+    },
+  })
+
+  return new Response(replay, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  })
+}
 
 /** Production transport — used when the interceptor context omits one. */
 const defaultAgyTransport: AgyTransport = (url, init, options) =>
@@ -480,45 +617,14 @@ export function createFetchInterceptor(
     let lastError: Error | null = null
     const abortSignal = init?.signal ?? undefined
     const maxWaitMs = (config.max_rate_limit_wait_seconds ?? 300) * 1000
-    const deadlineStartedAt = Date.now()
-    const deadlineError = new Error(
-      'Antigravity request timed out before receiving response headers.',
-    )
-    const deadlineController = maxWaitMs > 0 ? new AbortController() : undefined
-    const deadlineTimer = deadlineController
-      ? setTimeout(() => deadlineController.abort(deadlineError), maxWaitMs)
-      : undefined
-    deadlineTimer?.unref?.()
-    const requestSignal = deadlineController
-      ? abortSignal
-        ? AbortSignal.any([abortSignal, deadlineController.signal])
-        : deadlineController.signal
-      : abortSignal
-    const clearRequestDeadline = () => {
-      if (deadlineTimer) clearTimeout(deadlineTimer)
-    }
-    const stopRequestDeadline = () => {
-      clearRequestDeadline()
-      abortSignal?.removeEventListener('abort', clearRequestDeadline)
-    }
-    deadlineController?.signal.addEventListener('abort', stopRequestDeadline, {
-      once: true,
-    })
-    if (abortSignal?.aborted) {
-      clearRequestDeadline()
-    } else {
-      abortSignal?.addEventListener('abort', clearRequestDeadline, {
-        once: true,
-      })
-    }
-    const getActiveTransportTimeoutMs = () => {
-      if (!deadlineController) return ACTIVE_FETCH_TIMEOUT_MS
-      const remainingMs = maxWaitMs - (Date.now() - deadlineStartedAt)
-      if (remainingMs <= 0) throw deadlineError
-      return activeTransportTimeoutMs(remainingMs)
-    }
-    const withRequestSignal = (requestInit: RequestInit): RequestInit =>
-      requestSignal ? { ...requestInit, signal: requestSignal } : requestInit
+    const dispatchTimeoutMs =
+      maxWaitMs > 0 ? activeTransportTimeoutMs(maxWaitMs) : undefined
+    const requestSignal = abortSignal
+    const getActiveTransportTimeoutMs = () => ACTIVE_FETCH_TIMEOUT_MS
+    const withRequestSignal = (
+      requestInit: RequestInit,
+      signal: AbortSignal | undefined = requestSignal,
+    ): RequestInit => (signal ? { ...requestInit, signal } : requestInit)
 
     const checkAborted = () => {
       if (requestSignal?.aborted) {
@@ -1351,6 +1457,7 @@ export function createFetchInterceptor(
             continue
           }
 
+          let dispatchDeadline: DispatchDeadline | undefined
           try {
             const prepared = prepareAntigravityRequest(
               input,
@@ -1431,26 +1538,45 @@ export function createFetchInterceptor(
             pushDebug(
               `dispatching request via ${prepared.headerStyle} transport`,
             )
-            const response =
-              prepared.headerStyle === 'antigravity'
-                ? await transport(
-                    toUrlString(prepared.request),
-                    withRequestSignal(prepared.init),
-                    {
-                      signal: requestSignal,
-                      timeoutMs: getActiveTransportTimeoutMs(),
-                      onDebug: pushDebug,
-                    },
-                  )
-                : await fetchWithActiveTimeout(
-                    prepared.request,
-                    withRequestSignal(prepared.init),
-                    {
-                      timeoutMs: getActiveTransportTimeoutMs(),
-                      fetchImpl: upstreamFetch,
-                    },
-                  )
-            if (response.ok) stopRequestDeadline()
+            dispatchDeadline = createDispatchDeadline(
+              requestSignal,
+              dispatchTimeoutMs ?? 0,
+            )
+            const activeDeadline = dispatchDeadline
+            let response: Response
+            try {
+              response =
+                prepared.headerStyle === 'antigravity'
+                  ? await activeDeadline.race(
+                      transport(
+                        toUrlString(prepared.request),
+                        withRequestSignal(prepared.init, activeDeadline.signal),
+                        {
+                          signal: activeDeadline.signal,
+                          timeoutMs: dispatchTimeoutMs,
+                          onDebug: pushDebug,
+                        },
+                      ),
+                    )
+                  : await activeDeadline.race(
+                      fetchWithActiveTimeout(
+                        prepared.request,
+                        withRequestSignal(prepared.init, activeDeadline.signal),
+                        {
+                          timeoutMs: dispatchTimeoutMs,
+                          fetchImpl: upstreamFetch,
+                        },
+                      ),
+                    )
+              if (response.ok) {
+                response = await primeStreamingResponse(
+                  response,
+                  activeDeadline,
+                )
+              }
+            } finally {
+              activeDeadline.clear()
+            }
             apiRequestCount++
             accountManager.recordRequest(account.index, family)
             const requestCounts = accountManager.getDailyRequestCounts(
@@ -1940,7 +2066,6 @@ export function createFetchInterceptor(
               await logResponseBody(debugContext, response, response.status)
             }
             if (!response.ok) {
-              stopRequestDeadline()
               await logResponseBody(debugContext, response, response.status)
 
               if (response.status === 400) {
@@ -2117,6 +2242,31 @@ export function createFetchInterceptor(
                   headers: { 'Content-Type': 'application/json' },
                 },
               )
+            }
+
+            if (dispatchDeadline?.expired) {
+              log.warn('response wait expired; rotating account')
+              const cooldownMs = activeTransportTimeoutMs(maxWaitMs)
+              accountManager.markAccountCoolingDown(
+                account,
+                cooldownMs,
+                'network-error',
+              )
+              accountManager.markRateLimited(
+                account,
+                cooldownMs,
+                family,
+                headerStyle,
+                model,
+              )
+              getHealthTracker().recordFailure(account.index)
+              lastError =
+                error instanceof Error ? error : new Error(String(error))
+              pushDebug(
+                `response-timeout: account ${account.index} timed out before usable response data; switching account`,
+              )
+              shouldSwitchAccount = true
+              break
             }
 
             if (i < ANTIGRAVITY_ENDPOINT_FALLBACKS.length - 1) {
