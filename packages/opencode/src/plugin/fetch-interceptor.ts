@@ -90,6 +90,13 @@ const activeTransportTimeoutMs = (remainingMs?: number): number =>
 const RESPONSE_TIMEOUT_MESSAGE =
   'Antigravity request timed out before receiving usable response data.'
 
+class PreResponseStreamError extends Error {
+  constructor() {
+    super('Antigravity stream ended before producing response data.')
+    this.name = 'PreResponseStreamError'
+  }
+}
+
 interface DispatchDeadline {
   readonly signal: AbortSignal | undefined
   readonly expired: boolean
@@ -164,25 +171,38 @@ function abortReason(signal: AbortSignal): Error {
   return signal.reason instanceof Error ? signal.reason : new Error('Aborted')
 }
 
-async function readFirstResponseByte(
+async function readFirstUsableResponseChunk(
   reader: ReadableStreamDefaultReader<Uint8Array>,
   deadline: DispatchDeadline,
-): Promise<Uint8Array> {
+  eventStream: boolean,
+): Promise<Uint8Array[]> {
+  const bufferedChunks: Uint8Array[] = []
+  const decoder = eventStream ? new TextDecoder() : undefined
+  let bufferedText = ''
+
   while (true) {
     const { done, value } = await deadline.race(reader.read())
     if (done) {
-      throw new Error(
-        'Antigravity stream ended before producing response data.',
-      )
+      throw new PreResponseStreamError()
     }
-    if (value.byteLength > 0) return value
+    if (value.byteLength === 0) continue
+
+    bufferedChunks.push(value)
+    if (!decoder) return bufferedChunks
+
+    bufferedText += decoder.decode(value, { stream: true })
+    // SSE comments are keepalives, not model output. Keep the deadline active
+    // until the stream has started a non-empty data event.
+    if (/(?:^|\r?\n)data:\s*\S/.test(bufferedText)) {
+      return bufferedChunks
+    }
   }
 }
 
 /**
- * Wait for the first response byte before returning control to OpenCode.
- * That keeps a per-dispatch deadline active across an otherwise invisible
- * headers-only state, while replaying the byte to the normal transformer.
+ * Wait for the first usable response data before returning control to
+ * OpenCode. That keeps a per-dispatch deadline active across headers-only and
+ * keepalive-only states, while replaying the buffered data to the transformer.
  */
 async function primeStreamingResponse(
   response: Response,
@@ -191,14 +211,30 @@ async function primeStreamingResponse(
   if (!response.body) return response
 
   const reader = response.body.getReader()
-  let bufferedChunk = await readFirstResponseByte(reader, deadline)
+  let bufferedChunks: Uint8Array[]
+  try {
+    bufferedChunks = await readFirstUsableResponseChunk(
+      reader,
+      deadline,
+      response.headers
+        .get('content-type')
+        ?.toLowerCase()
+        .includes('text/event-stream') ?? false,
+    )
+  } catch (error) {
+    void reader.cancel(error).catch(() => {})
+    throw error
+  }
+  let bufferedIndex = 0
   const replay = new ReadableStream<Uint8Array>({
     async pull(controller) {
-      if (bufferedChunk) {
-        const chunk = bufferedChunk
-        bufferedChunk = undefined
-        controller.enqueue(chunk)
-        return
+      if (bufferedIndex < bufferedChunks.length) {
+        const chunk = bufferedChunks[bufferedIndex]
+        bufferedIndex += 1
+        if (chunk) {
+          controller.enqueue(chunk)
+          return
+        }
       }
 
       try {
@@ -1554,6 +1590,7 @@ export function createFetchInterceptor(
                         {
                           signal: activeDeadline.signal,
                           timeoutMs: dispatchTimeoutMs,
+                          idleTimeoutMs: dispatchTimeoutMs,
                           onDebug: pushDebug,
                         },
                       ),
@@ -2239,8 +2276,15 @@ export function createFetchInterceptor(
               )
             }
 
-            if (dispatchDeadline?.expired) {
-              log.warn('response wait expired; rotating account')
+            const preResponseFailure =
+              dispatchDeadline?.expired ||
+              error instanceof PreResponseStreamError
+            if (preResponseFailure) {
+              log.warn(
+                dispatchDeadline?.expired
+                  ? 'response wait expired; rotating account'
+                  : 'response stream ended before data; rotating account',
+              )
               const cooldownMs = activeTransportTimeoutMs(maxWaitMs)
               accountManager.markAccountCoolingDown(
                 account,
@@ -2258,7 +2302,9 @@ export function createFetchInterceptor(
               lastError =
                 error instanceof Error ? error : new Error(String(error))
               pushDebug(
-                `response-timeout: account ${account.index} timed out before usable response data; switching account`,
+                dispatchDeadline?.expired
+                  ? `response-timeout: account ${account.index} timed out before usable response data; switching account`
+                  : `response-ended: account ${account.index} ended before usable response data; switching account`,
               )
               shouldSwitchAccount = true
               break

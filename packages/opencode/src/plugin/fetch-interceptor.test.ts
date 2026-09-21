@@ -597,7 +597,7 @@ describe('createFetchInterceptor', () => {
       interceptor.dispose()
     })
 
-    it('switches accounts when a response body does not produce its first byte', async () => {
+    it('switches accounts when a response only produces SSE keepalives', async () => {
       const accountManager = new AccountManager(undefined, {
         version: 4,
         accounts: [
@@ -632,10 +632,17 @@ describe('createFetchInterceptor', () => {
           new Headers(init?.headers).get('authorization') ?? ''
         seenAuthorizations.push(authorization)
         if (authorization === 'Bearer access-a') {
-          return new Response(new ReadableStream({ start() {} }), {
-            status: 503,
-            headers: { 'content-type': 'text/event-stream' },
-          })
+          return new Response(
+            new ReadableStream({
+              start(controller) {
+                controller.enqueue(new TextEncoder().encode(': keepalive\n\n'))
+              },
+            }),
+            {
+              status: 200,
+              headers: { 'content-type': 'text/event-stream' },
+            },
+          )
         }
         return new Response(
           'data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"done"}]}}]}}\n\n',
@@ -663,8 +670,85 @@ describe('createFetchInterceptor', () => {
         body: JSON.stringify({ contents: [] }),
       })
 
-      expect(await response.text()).toContain('done')
       expect(seenAuthorizations).toEqual(['Bearer access-a', 'Bearer access-b'])
+      expect(await response.text()).toContain('done')
+      interceptor.dispose()
+    })
+
+    it('switches accounts when a stream ends before producing data', async () => {
+      const accountManager = new AccountManager(undefined, {
+        version: 4,
+        accounts: [
+          {
+            email: 'account-a@example.test',
+            refreshToken: 'refresh-a',
+            projectId: 'project-a',
+            managedProjectId: 'managed-a',
+            addedAt: FIXED_NOW - 20_000,
+            lastUsed: FIXED_NOW - 10_000,
+          },
+          {
+            email: 'account-b@example.test',
+            refreshToken: 'refresh-b',
+            projectId: 'project-b',
+            managedProjectId: 'managed-b',
+            addedAt: FIXED_NOW - 20_000,
+            lastUsed: FIXED_NOW - 12_000,
+          },
+        ],
+        activeIndex: 0,
+        activeIndexByFamily: { claude: 0, gemini: 0 },
+      })
+      for (const entry of accountManager.getAccounts()) {
+        entry.access = entry.index === 0 ? 'access-a' : 'access-b'
+        entry.expires = Date.now() + 3_600_000
+      }
+
+      const seenAuthorizations: string[] = []
+      const transport: AgyTransport = async (_url, init) => {
+        const authorization =
+          new Headers(init?.headers).get('authorization') ?? ''
+        seenAuthorizations.push(authorization)
+        if (authorization === 'Bearer access-a') {
+          return new Response(
+            new ReadableStream({
+              start(controller) {
+                controller.close()
+              },
+            }),
+            {
+              status: 200,
+              headers: { 'content-type': 'text/event-stream' },
+            },
+          )
+        }
+        return new Response(
+          'data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"done"}]}}]}}\n\n',
+          { status: 200, headers: { 'content-type': 'text/event-stream' } },
+        )
+      }
+      const context = await makeContext({
+        accountManager,
+        agyTransport: transport,
+        config: {
+          ...DEFAULT_CONFIG,
+          account_selection_strategy: 'sticky',
+          cache_warmup_on_switch: false,
+          max_account_switches: 1,
+          request_jitter_max_ms: 0,
+          switch_account_delay_ms: 0,
+        },
+      })
+      const interceptor = createFetchInterceptor(context)
+
+      const response = await interceptor.fetch(GENERATIVE_URL, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ contents: [] }),
+      })
+
+      expect(seenAuthorizations).toEqual(['Bearer access-a', 'Bearer access-b'])
+      expect(await response.text()).toContain('done')
       interceptor.dispose()
     })
 
